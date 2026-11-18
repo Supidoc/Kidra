@@ -88,7 +88,7 @@ jobs:
     steps:
       # Config: release-please-config.json, .release-please-manifest.json.
       - id: rp
-        uses: googleapis/release-please-action@v4
+        uses: googleapis/release-please-action@v5
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
@@ -107,7 +107,7 @@ jobs:
       digest: ${{ steps.full.outputs.digest }}
       slim-digest: ${{ steps.slim.outputs.digest }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -133,9 +133,9 @@ jobs:
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -143,7 +143,7 @@ jobs:
 
       - name: Metadata (full)
         id: meta-full
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.vars.outputs.image }}
           tags: |
@@ -155,7 +155,7 @@ jobs:
 
       - name: Metadata (slim)
         id: meta-slim
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ steps.vars.outputs.image }}
           tags: |
@@ -167,7 +167,7 @@ jobs:
 
       - name: Build and push (full)
         id: full
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -186,7 +186,7 @@ jobs:
 
       - name: Build and push (slim)
         id: slim
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
@@ -232,7 +232,7 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
