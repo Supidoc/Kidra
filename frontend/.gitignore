@@ -1,0 +1,12 @@
+# Frontend-local ignores (also read by eslint and prettier)
+node_modules
+/.svelte-kit
+/build
+/.output
+/static/occt-import-js/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+.env
+.env.*
+!.env.example
+!.env.test

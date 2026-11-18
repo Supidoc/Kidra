@@ -1,0 +1,116 @@
+# CI checks: frontend (lint, svelte-check, vitest, build) and backend
+# (gofmt, go vet, go test). Runs on GitHub-hosted runners only.
+#
+# Triggers:
+#   - pull_request            (any target branch)
+#   - push to non-main branches
+#   - workflow_call           (main.yml calls this for pushes to main, so main
+#                              is not checked twice)
+#
+# Required repository settings (Settings -> Actions -> General):
+#   - "Fork pull request workflows from outside collaborators":
+#     "Require approval for all outside collaborators" (keep it on).
+#   - Workflow permissions: "Read repository contents" (default token is
+#     read-only; every job below declares what it needs).
+# No secrets or variables are used by this workflow.
+
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches-ignore:
+      - main
+  workflow_call:
+
+permissions: {}
+
+concurrency:
+  # Outside workflow_call this cancels superseded runs of the same branch/PR.
+  # When called from main.yml the caller's concurrency group applies as well.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      # Version comes from "packageManager" in frontend/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Type check
+        run: pnpm run check
+
+      - name: Unit tests
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Verify build output
+        run: test -f ../backend/ui/dist/index.html
+
+      - name: Upload ui-dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: backend/ui/dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::These files are not gofmt-formatted:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...

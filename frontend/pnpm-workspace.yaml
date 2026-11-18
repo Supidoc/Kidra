@@ -1,0 +1,6 @@
+allowBuilds:
+  better-sqlite3: true
+  # Only prints a funding banner.
+  core-js: false
+patchedDependencies:
+  online-3d-viewer@0.18.0: patches/online-3d-viewer@0.18.0.patch

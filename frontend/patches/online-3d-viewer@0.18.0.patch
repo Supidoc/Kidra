@@ -1,0 +1,32 @@
+diff --git a/build/engine/o3dv.module.js b/build/engine/o3dv.module.js
+index 2d2d39c5775758f2cf0188df95f16f9c2c7fa8d1..e349f4ff26dd5959c9c86c58a16327320efb50a1 100644
+--- a/build/engine/o3dv.module.js
++++ b/build/engine/o3dv.module.js
+@@ -869,8 +869,15 @@ function CreateOcctWorker (worker)
+ 			return;
+ 		}
+ 
++		// Patched (KIDRA): globalThis.O3DV_OCCT_URLS = { worker, js, wasm } (absolute URLs)
++		// serves occt-import-js locally instead of from the CDN.
+ 		let baseUrl = 'https://cdn.jsdelivr.net/npm/occt-import-js@0.0.22/dist/';
+-		fetch (baseUrl + 'occt-import-js-worker.js')
++		let occtUrls = globalThis.O3DV_OCCT_URLS || {
++			worker : baseUrl + 'occt-import-js-worker.js',
++			js : baseUrl + 'occt-import-js.js',
++			wasm : baseUrl + 'occt-import-js.wasm'
++		};
++		fetch (occtUrls.worker)
+ 			.then ((response) => {
+ 				if (!response.ok) {
+ 					return reject ();
+@@ -878,8 +885,8 @@ function CreateOcctWorker (worker)
+ 				return response.text ();
+ 			})
+ 			.then ((workerScript) => {
+-				workerScript = workerScript.replace ('occt-import-js.js', baseUrl + 'occt-import-js.js');
+-				workerScript = workerScript.replace ('return path', 'return \'' + baseUrl + 'occt-import-js.wasm\'');
++				workerScript = workerScript.replace ('\'occt-import-js.js\'', '\'' + occtUrls.js + '\'');
++				workerScript = workerScript.replace ('return path', 'return \'' + occtUrls.wasm + '\'');
+ 				let blob = new Blob ([workerScript], { type : 'text/javascript' });
+ 				occtWorkerUrl = URL.createObjectURL (blob);
+ 				return resolve (new Worker (occtWorkerUrl));

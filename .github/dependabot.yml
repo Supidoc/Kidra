@@ -1,0 +1,20 @@
+# Keeps GitHub Actions versions current. Docker base images (kicad/kicad,
+# golang, node, distroless) are bumped manually on purpose, and npm/gomod
+# updates are not managed here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns:
+          - "*"
+    # Conventional commit "chore(deps): ..." so release-please files these
+    # CI-only bumps under a hidden section (no release PR just for them).
+    # Product dependencies (npm/gomod), if added later, should use prefix
+    # "deps" instead, which shows up under "Dependencies" in CHANGELOG.md.
+    commit-message:
+      prefix: chore
+      include: scope

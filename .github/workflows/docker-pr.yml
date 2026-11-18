@@ -1,0 +1,70 @@
+# Docker build check for pull requests: builds the `slim` and `full` targets
+# of the root Dockerfile without pushing anything. Runs on GitHub-hosted
+# runners only, and only when files that affect the image changed.
+#
+# Required repository settings:
+#   - Fork PR approval stays on (Settings -> Actions -> General ->
+#     "Require approval for all outside collaborators").
+# No secrets or variables are used. Nothing is pushed to GHCR from PRs; the
+# GitHub Actions cache is read from main's scopes and written to PR-scoped
+# cache entries (GitHub isolates PR cache writes to the PR ref).
+
+name: docker-pr
+
+on:
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - backend/**
+      - frontend/**
+      - .node-version
+      - .github/workflows/docker-pr.yml
+
+permissions: {}
+
+concurrency:
+  group: docker-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [slim, full]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build args
+        id: args
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo "short_sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build ${{ matrix.target }} (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: false
+          # Keep the result in the builder cache only; the full image is
+          # ~3.5 GB and does not need to be loaded into the runner's daemon.
+          outputs: type=cacheonly
+          build-args: |
+            VERSION=0.0.0-pr${{ github.event.pull_request.number }}+${{ steps.args.outputs.short_sha }}
+            COMMIT=${{ github.event.pull_request.head.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,scope=${{ matrix.target }},mode=max

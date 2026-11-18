@@ -1,0 +1,31 @@
+# Keep the build context small and free of local state / secrets.
+.git
+.github/
+.claude
+.agents
+.vscode
+deploy/
+
+**/node_modules
+**/.svelte-kit
+frontend/build
+frontend/.output
+frontend/static/occt-import-js
+
+backend/ui/dist
+backend/pb_data
+backend/pb_public
+backend/kidra
+backend/kidra.exe
+backend/pocketbase
+pb_data
+dist
+
+# Env files and secrets (only the documented example may enter the context)
+**/.env
+**/.env.*
+**/*.env
+!.env.example
+
+**/*.timestamp-*
+**/.DS_Store

@@ -1,0 +1,280 @@
+#!/usr/bin/env bash
+# kidra-deploy: SSH forced-command entry point for the `deploy` user on a Kidra VM.
+#
+# Installed to /usr/local/bin/kidra-deploy by deploy/vm/setup.sh and bound to the
+# CI key in ~deploy/.ssh/authorized_keys:
+#   restrict,command="/usr/local/bin/kidra-deploy" ssh-ed25519 AAAA... kidra-ci
+#
+# The requested command arrives in $SSH_ORIGINAL_COMMAND and must be one of:
+#   prepare <image@digest>  read a tar (compose.yaml + kidra.env) from stdin, stage
+#                           it in $KIDRA_ROOT/.staged and `docker pull` the image.
+#                           The running app is not touched (no downtime).
+#   stop                    `docker compose stop` the running app.
+#   up <image@digest>       install the staged files, write .env (KIDRA_IMAGE=...),
+#                           `docker compose up -d --remove-orphans`, wait for the
+#                           container to become healthy (exit 1 otherwise).
+#   start                   discard staged files and start the currently installed
+#                           app again (used after a snapshot rollback).
+#   status                  print image/state/health as key=value lines.
+#   logs                    print the last 200 log lines of the app.
+#
+# Image references must be pinned by digest:
+#   ghcr.io/<owner>/kidra@sha256:<64 hex>
+#
+# Environment (for testing only; sshd's `restrict` does not let clients set it):
+#   KIDRA_ROOT            app directory (default /srv/kidra)
+#   KIDRA_HEALTH_TIMEOUT  seconds `up`/`start` wait for a healthy container (default 120)
+#   KIDRA_STOP_TIMEOUT    seconds `docker compose stop` waits (default 30)
+set -euo pipefail
+
+KIDRA_ROOT=${KIDRA_ROOT:-/srv/kidra}
+HEALTH_TIMEOUT=${KIDRA_HEALTH_TIMEOUT:-120}
+STOP_TIMEOUT=${KIDRA_STOP_TIMEOUT:-30}
+SERVICE=kidra
+PROJECT=kidra
+IMAGE_RE='^ghcr\.io/[a-z0-9._-]+/kidra@sha256:[0-9a-f]{64}$'
+MAX_TAR_BYTES=$((4 * 1024 * 1024))
+STAGED="$KIDRA_ROOT/.staged"
+
+log() {
+	printf 'kidra-deploy: %s\n' "$*" >&2
+	if command -v logger >/dev/null 2>&1; then
+		logger -t kidra-deploy -- "$*" || true
+	fi
+}
+
+die() {
+	log "error: $*"
+	exit 1
+}
+
+usage() {
+	die "usage: prepare <image@digest> | stop | up <image@digest> | start | status | logs"
+}
+
+validate_image() {
+	[[ $1 =~ $IMAGE_RE ]] || die "invalid image reference (want ghcr.io/<owner>/kidra@sha256:<64 hex>): $1"
+}
+
+compose() {
+	docker compose --project-name "$PROJECT" --project-directory "$KIDRA_ROOT" \
+		-f "$KIDRA_ROOT/compose.yaml" "$@"
+}
+
+lock() {
+	exec 9>"$KIDRA_ROOT/.deploy.lock"
+	flock -w 600 9 || die "could not acquire $KIDRA_ROOT/.deploy.lock"
+}
+
+container_id() {
+	compose ps -a -q "$SERVICE" 2>/dev/null | head -n1
+}
+
+# Prints "<state> <health>" for the app container, health is "none" when the
+# container has no healthcheck, both are "absent" when there is no container.
+container_state() {
+	local id
+	id=$(container_id)
+	if [[ -z $id ]]; then
+		echo "absent absent"
+		return
+	fi
+	docker inspect -f '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$id" 2>/dev/null ||
+		echo "absent absent"
+}
+
+wait_healthy() {
+	local deadline state=unknown health=unknown
+	deadline=$((SECONDS + HEALTH_TIMEOUT))
+	while ((SECONDS < deadline)); do
+		read -r state health < <(container_state)
+		case "$state/$health" in
+		running/healthy)
+			log "container is healthy"
+			return 0
+			;;
+		running/none)
+			# No healthcheck defined: accept a container that keeps running.
+			sleep 10
+			read -r state health < <(container_state)
+			if [[ $state == running ]]; then
+				log "container is running (no healthcheck defined)"
+				return 0
+			fi
+			;;
+		running/unhealthy)
+			log "container reported unhealthy"
+			return 1
+			;;
+		exited/* | dead/*)
+			log "container is $state"
+			return 1
+			;;
+		esac
+		sleep 2
+	done
+	log "timed out after ${HEALTH_TIMEOUT}s waiting for a healthy container (state=$state health=$health)"
+	return 1
+}
+
+cmd_prepare() {
+	local image=$1 tmp tarfile size line name mode
+	validate_image "$image"
+	lock
+
+	tmp=$(mktemp -d "$KIDRA_ROOT/.incoming.XXXXXX")
+	# shellcheck disable=SC2064 # expand $tmp now
+	trap "rm -rf -- '$tmp'" EXIT
+	tarfile="$tmp/bundle.tar"
+
+	head -c $((MAX_TAR_BYTES + 1)) >"$tarfile"
+	size=$(stat -c %s "$tarfile")
+	((size > 0)) || die "prepare: expected a tar archive on stdin"
+	((size <= MAX_TAR_BYTES)) || die "prepare: archive larger than $MAX_TAR_BYTES bytes"
+
+	# Only the two expected regular files, no paths, no links, no devices.
+	local -A seen=()
+	while IFS= read -r line; do
+		mode=${line%% *}
+		[[ $mode == -* ]] || die "prepare: archive entry is not a regular file: $line"
+	done < <(tar -tvf "$tarfile")
+	while IFS= read -r name; do
+		case "$name" in
+		compose.yaml | kidra.env) ;;
+		*) die "prepare: unexpected archive entry: $name" ;;
+		esac
+		[[ -z ${seen[$name]:-} ]] || die "prepare: duplicate archive entry: $name"
+		seen[$name]=1
+	done < <(tar -tf "$tarfile")
+	[[ -n ${seen[compose.yaml]:-} && -n ${seen[kidra.env]:-} ]] ||
+		die "prepare: archive must contain compose.yaml and kidra.env"
+
+	mkdir "$tmp/files"
+	tar -xf "$tarfile" -C "$tmp/files" --no-same-owner --no-same-permissions \
+		--no-overwrite-dir compose.yaml kidra.env
+	for name in compose.yaml kidra.env; do
+		[[ -f "$tmp/files/$name" && ! -L "$tmp/files/$name" ]] || die "prepare: $name is not a regular file"
+		chmod 0640 "$tmp/files/$name"
+	done
+	printf '%s\n' "$image" >"$tmp/files/IMAGE"
+
+	# Validate the new compose file before staging it.
+	KIDRA_IMAGE=$image docker compose --project-name "$PROJECT" --project-directory "$KIDRA_ROOT" \
+		-f "$tmp/files/compose.yaml" config -q || die "prepare: compose.yaml is invalid"
+
+	rm -rf -- "$STAGED"
+	mv "$tmp/files" "$STAGED"
+	log "staged compose.yaml and kidra.env for $image"
+
+	log "pulling $image"
+	docker pull --quiet "$image" >&2 || die "prepare: docker pull failed for $image"
+	log "prepare done for $image"
+}
+
+cmd_stop() {
+	lock
+	if [[ ! -f "$KIDRA_ROOT/compose.yaml" ]]; then
+		log "stop: no compose.yaml installed yet, nothing to stop"
+		return 0
+	fi
+	compose stop --timeout "$STOP_TIMEOUT" >&2
+	log "stopped"
+}
+
+cmd_up() {
+	local image=$1 staged_image
+	validate_image "$image"
+	lock
+
+	if [[ -d $STAGED ]]; then
+		staged_image=$(cat "$STAGED/IMAGE" 2>/dev/null || true)
+		[[ $staged_image == "$image" ]] ||
+			die "up: staged files belong to '$staged_image', not $image; run prepare again"
+		install -m 0640 "$STAGED/compose.yaml" "$KIDRA_ROOT/compose.yaml.new"
+		install -m 0640 "$STAGED/kidra.env" "$KIDRA_ROOT/kidra.env.new"
+		mv -f "$KIDRA_ROOT/compose.yaml.new" "$KIDRA_ROOT/compose.yaml"
+		mv -f "$KIDRA_ROOT/kidra.env.new" "$KIDRA_ROOT/kidra.env"
+		rm -rf -- "$STAGED"
+		log "installed staged compose.yaml and kidra.env"
+	fi
+	[[ -f "$KIDRA_ROOT/compose.yaml" ]] || die "up: no compose.yaml; run prepare first"
+
+	printf 'KIDRA_IMAGE=%s\n' "$image" >"$KIDRA_ROOT/.env.new"
+	chmod 0640 "$KIDRA_ROOT/.env.new"
+	mv -f "$KIDRA_ROOT/.env.new" "$KIDRA_ROOT/.env"
+
+	log "starting $image"
+	compose up -d --remove-orphans >&2 || die "up: docker compose up failed"
+	wait_healthy || die "up: $image did not become healthy"
+	# Images pulled by digest are untagged: drop the ones no container uses any
+	# more (older versions; the shared KiCad base layers stay).
+	docker image prune -f >/dev/null 2>&1 || log "image prune failed (ignored)"
+	log "up done for $image"
+}
+
+cmd_start() {
+	lock
+	rm -rf -- "$STAGED"
+	if [[ ! -f "$KIDRA_ROOT/compose.yaml" || ! -f "$KIDRA_ROOT/.env" ]]; then
+		log "start: no app installed yet, nothing to start"
+		return 0
+	fi
+	compose up -d >&2 || die "start: docker compose up failed"
+	wait_healthy || die "start: app did not become healthy"
+	log "start done"
+}
+
+cmd_status() {
+	local configured="" id running="" state health
+	if [[ -f "$KIDRA_ROOT/.env" ]]; then
+		configured=$(sed -n 's/^KIDRA_IMAGE=//p' "$KIDRA_ROOT/.env" | head -n1)
+	fi
+	if [[ -f "$KIDRA_ROOT/compose.yaml" ]]; then
+		id=$(container_id)
+		read -r state health < <(container_state)
+		if [[ -n $id ]]; then
+			running=$(docker inspect -f '{{.Config.Image}}' "$id" 2>/dev/null || true)
+		fi
+	else
+		state=absent
+		health=absent
+	fi
+	printf 'image=%s\n' "$configured"
+	printf 'container_image=%s\n' "$running"
+	printf 'state=%s\n' "$state"
+	printf 'health=%s\n' "$health"
+	printf 'staged=%s\n' "$(cat "$STAGED/IMAGE" 2>/dev/null || true)"
+}
+
+cmd_logs() {
+	if [[ ! -f "$KIDRA_ROOT/compose.yaml" ]]; then
+		log "logs: no compose.yaml installed yet"
+		return 0
+	fi
+	compose logs --no-color --timestamps --tail 200 "$SERVICE"
+}
+
+main() {
+	local original=${SSH_ORIGINAL_COMMAND:-}
+	local -a args=()
+
+	[[ -n $original ]] || usage
+	# Only plain words: subcommand plus an optional image reference.
+	[[ $original =~ ^[a-z]+(\ [A-Za-z0-9@:/._-]+)?$ ]] || die "rejected command: $original"
+	read -r -a args <<<"$original"
+	[[ -d $KIDRA_ROOT ]] || die "$KIDRA_ROOT does not exist; run setup.sh"
+	cd "$KIDRA_ROOT"
+
+	log "command: $original"
+	case "${args[0]}:${#args[@]}" in
+	prepare:2) cmd_prepare "${args[1]}" ;;
+	stop:1) cmd_stop ;;
+	up:2) cmd_up "${args[1]}" ;;
+	start:1) cmd_start ;;
+	status:1) cmd_status ;;
+	logs:1) cmd_logs ;;
+	*) usage ;;
+	esac
+}
+
+main "$@"

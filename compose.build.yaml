@@ -1,0 +1,10 @@
+# Override that builds the image from this checkout instead of pulling it.
+#
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
+#   KIDRA_TARGET=slim docker compose -f compose.yaml -f compose.build.yaml up -d --build
+services:
+  kidra:
+    image: kidra:local
+    build:
+      context: .
+      target: ${KIDRA_TARGET:-full}
