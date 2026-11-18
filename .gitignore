@@ -1,0 +1,38 @@
+# Dependencies / build output
+node_modules
+.svelte-kit
+/frontend/build
+/frontend/.output
+/frontend/static/occt-import-js/
+/backend/ui/dist/
+/dist/
+
+# Backend runtime data and binaries
+/backend/pb_data
+/backend/kidra
+/backend/kidra.exe
+/backend/myapp
+/backend/pocketbase
+/backend/pb_public
+
+# Local deploy / compose data
+/pb_data
+/svelt
+
+# Env & secrets
+.env
+.env.*
+!.env.example
+!.env.test
+secrets.env
+kidra.env
+
+# Vite
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+
+# OS
+.DS_Store
+Thumbs.db
+/.claude/worktrees/
+/backend/__debug_bin*

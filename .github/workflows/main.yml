@@ -1,0 +1,276 @@
+# Push to main: run CI, maintain the release PR, publish images to GHCR,
+# deploy to the dev VM and, when the push is a merged release PR, release and
+# deploy to prod.
+#
+#   ci              -> reusable ci.yml (GitHub-hosted)
+#   release-please  -> googleapis/release-please-action: opens/updates the
+#                      release PR (CHANGELOG.md, version.txt,
+#                      frontend/package.json). When the push *is* the merged
+#                      release PR, it creates the tag vX.Y.Z and the GitHub
+#                      release instead (outputs release_created etc.).
+#   image           -> builds `full` and `slim`, pushes
+#                        ghcr.io/<owner>/kidra:sha-<7>, :dev
+#                        ghcr.io/<owner>/kidra:sha-<7>-slim, :dev-slim
+#                      VERSION build arg: X.Y.Z on a release commit, otherwise
+#                      <version.txt>+<sha7> (semver build metadata, "after X.Y.Z").
+#                      (GitHub-hosted, GHA layer cache, provenance attestation)
+#   deploy-dev      -> self-hosted runner [self-hosted, kidra-deploy], deploys
+#                      the `full` image *by digest* via deploy/ci/deploy.sh
+#   release         -> reusable release.yml, only when release-please created a
+#                      release, and only after deploy-dev of the same commit
+#                      succeeded: retag images, native archives, upload assets
+#                      to the release, deploy the same digest to prod.
+#
+# Why release runs here and not on `push: tags`: tags and releases created with
+# the default GITHUB_TOKEN do not trigger other workflows. If tag-triggered
+# workflows (or CI on the release PR) are wanted later, pass a GitHub App
+# installation token (actions/create-github-app-token) as `token:` to
+# release-please. Not needed for this setup.
+#
+# Required repository settings:
+#   - Settings -> Actions -> General:
+#       * Fork PR approval: "Require approval for all outside collaborators".
+#       * Workflow permissions: read-only default (jobs request what they need)
+#         and "Allow GitHub Actions to create and approve pull requests"
+#         enabled (release-please opens the release PR with GITHUB_TOKEN).
+#   - Settings -> Environments -> `dev`:
+#       * Deployment branches and tags: "Selected" -> branch `main` only.
+#       * Environment secrets:
+#           DEPLOY_SSH_KEY   private key whose public half is in the dev VM's
+#                            authorized_keys with
+#                            restrict,command="/usr/local/bin/kidra-deploy"
+#           VM_KNOWN_HOSTS   known_hosts line(s) for the dev VM
+#           PVE_API_TOKEN    "user@realm!tokenid=uuid" (VM.Snapshot,
+#                            VM.PowerMgmt, VM.Audit on the dev VM only)
+#       * Environment variables:
+#           PVE_API_URL      e.g. https://pve.lan:8006   (deploy.sh appends /api2/json)
+#           PVE_NODE         Proxmox node name holding the VM
+#           VM_ID            Proxmox VMID of kidra-dev
+#           VM_HOST          hostname/IP of kidra-dev (SSH + health check)
+#   - Settings -> Environments -> `prod`: see release.yml.
+#   - Self-hosted runner registered to this repo with label `kidra-deploy`.
+#   - GHCR: after the first push, set the `kidra` package visibility to
+#     Public (Packages -> kidra -> Package settings) and link it to this repo.
+
+name: main
+
+on:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+concurrency:
+  group: main
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    name: ci
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # release branch, tag, GitHub release
+      pull-requests: write # release PR
+      issues: write # "autorelease: pending/tagged" labels
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      version: ${{ steps.rp.outputs.version }}
+      major: ${{ steps.rp.outputs.major }}
+      minor: ${{ steps.rp.outputs.minor }}
+    steps:
+      # Config: release-please-config.json, .release-please-manifest.json.
+      - id: rp
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  image:
+    name: image
+    needs: [ci, release-please]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+      digest: ${{ steps.full.outputs.digest }}
+      slim-digest: ${{ steps.slim.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Compute names and version
+        id: vars
+        env:
+          OWNER: ${{ github.repository_owner }}
+          RELEASE_CREATED: ${{ needs.release-please.outputs.release_created }}
+          RELEASE_VERSION: ${{ needs.release-please.outputs.version }}
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          if [[ "$RELEASE_CREATED" == "true" ]]; then
+            version="$RELEASE_VERSION"
+          else
+            base="$(tr -d '[:space:]' < version.txt)"
+            [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version.txt '$base' is not X.Y.Z"; exit 1; }
+            # Build metadata: "built from a commit after release $base".
+            version="${base}+${short_sha}"
+          fi
+          {
+            echo "image=ghcr.io/${OWNER,,}/kidra"
+            echo "short_sha=$short_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Metadata (full)
+        id: meta-full
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.short_sha }}
+            type=raw,value=dev
+          labels: |
+            org.opencontainers.image.title=kidra
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+
+      - name: Metadata (slim)
+        id: meta-slim
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          tags: |
+            type=raw,value=sha-${{ steps.vars.outputs.short_sha }}-slim
+            type=raw,value=dev-slim
+          labels: |
+            org.opencontainers.image.title=kidra-slim
+            org.opencontainers.image.version=${{ steps.vars.outputs.version }}
+
+      - name: Build and push (full)
+        id: full
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: full
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          tags: ${{ steps.meta-full.outputs.tags }}
+          labels: ${{ steps.meta-full.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,scope=full,mode=max
+
+      - name: Build and push (slim)
+        id: slim
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: slim
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          tags: ${{ steps.meta-slim.outputs.tags }}
+          labels: ${{ steps.meta-slim.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            COMMIT=${{ github.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=slim
+          cache-to: type=gha,scope=slim,mode=max
+
+      - name: Summary
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          VERSION: ${{ steps.vars.outputs.version }}
+          FULL_DIGEST: ${{ steps.full.outputs.digest }}
+          SLIM_DIGEST: ${{ steps.slim.outputs.digest }}
+        run: |
+          {
+            echo "### Published images (version \`${VERSION}\`)"
+            echo "- full: \`${IMAGE}@${FULL_DIGEST}\`"
+            echo "- slim: \`${IMAGE}@${SLIM_DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy-dev:
+    name: deploy dev
+    needs: image
+    # Self-hosted deploy runner. This workflow only triggers on push to main,
+    # never on pull_request, so untrusted code never reaches this runner.
+    runs-on: [self-hosted, kidra-deploy]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+    environment:
+      name: dev
+    concurrency:
+      group: deploy-dev
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Deploy
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          VM_KNOWN_HOSTS: ${{ secrets.VM_KNOWN_HOSTS }}
+          PVE_API_TOKEN: ${{ secrets.PVE_API_TOKEN }}
+          PVE_API_URL: ${{ vars.PVE_API_URL }}
+          PVE_NODE: ${{ vars.PVE_NODE }}
+          VM_ID: ${{ vars.VM_ID }}
+          VM_HOST: ${{ vars.VM_HOST }}
+          KEEP_SNAPSHOTS: ${{ vars.KEEP_SNAPSHOTS }}
+          HEALTH_TIMEOUT: ${{ vars.HEALTH_TIMEOUT }}
+          VM_HTTP_PORT: ${{ vars.VM_HTTP_PORT }}
+          PVE_INSECURE: ${{ vars.PVE_INSECURE }}
+          PVE_CA_FILE: ${{ vars.PVE_CA_FILE }}
+        run: |
+          test -f deploy/ci/deploy.sh || { echo "::error::deploy/ci/deploy.sh is missing"; exit 1; }
+          bash deploy/ci/deploy.sh dev "$IMAGE_REF" "$GITHUB_SHA"
+
+  release:
+    name: release
+    # Only for the merged release PR, and prod only after dev ran the same
+    # commit successfully.
+    needs: [release-please, image, deploy-dev]
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write # upload assets to / edit the release
+      packages: write # retag images on GHCR
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+      version: ${{ needs.release-please.outputs.version }}
+      sha7: ${{ needs.image.outputs.short_sha }}
+      digest: ${{ needs.image.outputs.digest }}
+      slim-digest: ${{ needs.image.outputs.slim-digest }}
+    # The prod environment's secrets are resolved inside release.yml's
+    # deploy-prod job (environment: prod); inherit passes repo secrets too.
+    secrets: inherit

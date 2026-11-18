@@ -1,0 +1,26 @@
+# Caddy reverse proxy for Kidra (LAN/VPN only).
+# Adjust the site address and the upstream (kidra-prod VM, port 8090).
+# For a LAN-only name, `tls internal` uses Caddy's local CA; replace it with
+# your own certificate or ACME DNS setup if you have one.
+
+kidra.lan {
+	tls internal
+
+	# Uploads (datasheets, 3D models, library files).
+	request_body {
+		max_size 100MB
+	}
+
+	reverse_proxy kidra-prod:8090 {
+		# Caddy sets X-Forwarded-For, X-Forwarded-Proto and X-Forwarded-Host
+		# itself and passes WebSocket upgrades through.
+		header_up X-Real-IP {remote_host}
+
+		# PocketBase realtime uses Server-Sent Events: stream responses
+		# immediately and allow long-lived connections.
+		flush_interval -1
+		transport http {
+			read_timeout 1h
+		}
+	}
+}

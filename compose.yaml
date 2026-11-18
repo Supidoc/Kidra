@@ -1,0 +1,44 @@
+# Kidra production image, for local runs and for the deploy VMs (/srv/kidra).
+#
+#   docker compose up -d
+#
+# Image: defaults to ghcr.io/supidoc/kidra:latest; override KIDRA_IMAGE in a .env
+# file next to this file (see .env.example). The deploy script
+# writes KIDRA_IMAGE=ghcr.io/<owner>/kidra@sha256:<digest> into /srv/kidra/.env.
+#
+# Data lives in ./pb_data (bind mount). The container runs as uid 1000 (user
+# `kicad`), so the host directory must be owned by uid 1000 before the first start:
+#   mkdir -p pb_data && sudo chown 1000:1000 pb_data
+#
+# Configuration: kidra.env (non-secret settings) and secrets.env (0600, e.g.
+# KIDRA_ADMIN_PASSWORD). Both are optional; see .env.example for all variables.
+#
+# To build the image locally instead of pulling it, add compose.build.yaml:
+#   docker compose -f compose.yaml -f compose.build.yaml up -d --build
+name: kidra
+
+services:
+  kidra:
+    image: ${KIDRA_IMAGE:-ghcr.io/supidoc/kidra:latest}
+    restart: unless-stopped
+    ports:
+      - "${KIDRA_PORT:-8090}:8090"
+    env_file:
+      - path: ./kidra.env
+        required: false
+      - path: ./secrets.env
+        required: false
+    volumes:
+      - ./pb_data:/pb_data
+      # Optional: KiCad's stock 3D models from the host (the image ships none).
+      # KIDRA_KICAD_STOCK_3DMODEL_DIR already points at /kicad-3dmodels.
+      # - /usr/share/kicad/3dmodels:/kicad-3dmodels:ro
+    tmpfs:
+      - /tmp
+    # PocketBase finishes in-flight requests and closes the DB on SIGTERM.
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -1,0 +1,79 @@
+# systemd unit for a native Linux install of Kidra (no Docker).
+#
+# Install:
+#   sudo useradd --system --home-dir /var/lib/kidra --shell /usr/sbin/nologin kidra
+#   sudo mkdir -p /opt/kidra /etc/kidra
+#   sudo tar -xzf kidra_<version>_linux_amd64.tar.gz -C /opt/kidra --strip-components=1
+#   #   -> /opt/kidra/kidra and /opt/kidra/pb_migrations/
+#   sudo cp kidra.service /etc/systemd/system/kidra.service
+#   sudo editor /etc/kidra/kidra.env      # settings and secrets, see below
+#   sudo chmod 0640 /etc/kidra/kidra.env && sudo chown root:kidra /etc/kidra/kidra.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now kidra
+#
+# /etc/kidra/kidra.env (dotenv, all optional), for example:
+#   KIDRA_LIBRARY_REPO=https://github.com/<you>/<libraries>.git
+#   KIDRA_LIBRARY_PULL_CRON=*/15 * * * *
+#   KIDRA_APP_URL=https://kidra.lan
+#   KIDRA_TRUSTED_PROXY=1
+#   KIDRA_ADMIN_EMAIL=admin@example.com
+#   KIDRA_ADMIN_PASSWORD=...
+#
+# SVG previews of symbols and footprints need kicad-cli, which is optional:
+#   sudo apt install kicad          # or the KiCad 10 PPA/backports package
+# Kidra finds kicad-cli on PATH; otherwise set KIDRA_KICAD_CLI=/path/to/kicad-cli
+# in /etc/kidra/kidra.env. Without it Kidra runs and shows "No preview available".
+#
+# Kidra listens on 127.0.0.1:8090 only; put the reverse proxy from
+# deploy/proxy/ in front of it.
+
+[Unit]
+Description=Kidra (KiCad part library manager)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kidra
+Group=kidra
+DynamicUser=no
+WorkingDirectory=/opt/kidra
+EnvironmentFile=-/etc/kidra/kidra.env
+# kicad-cli and git keep config/cache in $HOME; keep it inside the state dir.
+Environment=HOME=/var/lib/kidra
+ExecStart=/opt/kidra/kidra serve --http=127.0.0.1:8090 --dir=/var/lib/kidra
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# State: /var/lib/kidra (created and owned by systemd for User=kidra)
+StateDirectory=kidra
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/kidra
+UMask=0027
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

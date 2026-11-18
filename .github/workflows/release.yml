@@ -1,0 +1,514 @@
+# Release vX.Y.Z: publish the commit that main.yml already built and deployed
+# to dev. The tag and the GitHub release (notes from CHANGELOG.md) are created
+# by release-please in main.yml; this workflow adds images, assets and prod.
+#
+# Triggers:
+#   - workflow_call      from main.yml (job `release`) when release-please
+#                        created a release on this push. Inputs carry the tag,
+#                        version and the digests main.yml just pushed.
+#   - workflow_dispatch  manual re-run for an existing release tag (e.g. a
+#                        failed upload or prod deploy). Run it from `main`;
+#                        the tag's commit is looked up and must be on main.
+# There is deliberately no `push: tags` trigger: tags created by release-please
+# with GITHUB_TOKEN do not start workflows (see main.yml for the GitHub App
+# token alternative).
+#
+#   prepare         -> validate the tag, resolve tag -> commit
+#   image           -> retag the digests built by main.yml as :vX.Y.Z, :X.Y,
+#                      :latest, :prod (+ -slim variants). workflow_dispatch
+#                      only: uses :sha-<7>, or builds from source if missing.
+#   ui, binaries    -> native archives for linux/amd64, linux/arm64,
+#                      windows/amd64 (SPA embedded, CGO disabled)
+#   publish-release -> SHA256SUMS + `gh release upload --clobber` to the
+#                      existing release, image digests appended to its notes
+#   deploy-prod     -> self-hosted runner [self-hosted, kidra-deploy], deploys
+#                      the `full` image by digest
+#
+# Permissions: the caller must grant `contents: write` and `packages: write`
+# to the calling job; each job below narrows that down. Secrets: the caller
+# uses `secrets: inherit`; prod secrets come from the `prod` environment.
+#
+# Required repository settings:
+#   - Settings -> Actions -> General: fork PR approval on; read-only default
+#     workflow permissions; "Allow GitHub Actions to create and approve pull
+#     requests" (for release-please in main.yml).
+#   - Settings -> Environments -> `prod`:
+#       * Deployment branches and tags: "Selected" -> branch `main` (this
+#         workflow always runs with ref main: called from main.yml or
+#         dispatched from main).
+#       * Optional: required reviewers.
+#       * Environment secrets: DEPLOY_SSH_KEY, VM_KNOWN_HOSTS, PVE_API_TOKEN
+#         (same meaning as for `dev` in main.yml, but for kidra-prod).
+#       * Environment variables: PVE_API_URL, PVE_NODE, VM_ID, VM_HOST.
+#   - Self-hosted runner with label `kidra-deploy`.
+#   - GHCR package `kidra` visibility Public (after the first push).
+
+name: release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag created by release-please (vX.Y.Z)
+        type: string
+        required: true
+      version:
+        description: Version without the leading v (X.Y.Z)
+        type: string
+        required: true
+      sha7:
+        description: Short commit SHA the images were built from
+        type: string
+        required: true
+      digest:
+        description: Digest of the `full` image built by main.yml
+        type: string
+        required: true
+      slim-digest:
+        description: Digest of the `slim` image built by main.yml
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re-)publish and deploy (vX.Y.Z)
+        type: string
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      minor: ${{ steps.v.outputs.minor }}
+      sha: ${{ steps.v.outputs.sha }}
+      short_sha: ${{ steps.v.outputs.short_sha }}
+    steps:
+      - name: Checkout (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve tag and commit
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          TAG: ${{ inputs.tag }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_SHA7: ${{ inputs.sha7 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! [[ "$TAG" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::Tag '$TAG' is not of the form vX.Y.Z"
+            exit 1
+          fi
+          version="${TAG#v}"
+          minor="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+              echo "::error::Run this workflow from main (got $GITHUB_REF)"
+              exit 1
+            fi
+            sha="$(git rev-parse --verify "refs/tags/$TAG^{commit}")" \
+              || { echo "::error::Tag $TAG does not exist"; exit 1; }
+            if ! git merge-base --is-ancestor "$sha" origin/main; then
+              echo "::error::Tag $TAG ($sha) is not on main"
+              exit 1
+            fi
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null \
+              || { echo "::error::No GitHub release for $TAG (release-please creates it)"; exit 1; }
+          else
+            # Called from main.yml: the release commit is the pushed commit.
+            sha="$GITHUB_SHA"
+            if [[ "$IN_VERSION" != "$version" ]]; then
+              echo "::error::version input '$IN_VERSION' does not match tag '$TAG'"
+              exit 1
+            fi
+            if [[ "$IN_SHA7" != "${sha::7}" ]]; then
+              echo "::error::sha7 input '$IN_SHA7' does not match ${sha::7}"
+              exit 1
+            fi
+          fi
+
+          {
+            echo "tag=$TAG"
+            echo "version=$version"
+            echo "minor=$minor"
+            echo "sha=$sha"
+            echo "short_sha=${sha::7}"
+          } >> "$GITHUB_OUTPUT"
+
+  image:
+    name: image
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+      digest: ${{ steps.digest.outputs.digest }}
+      slim-digest: ${{ steps.digest.outputs.slim_digest }}
+    env:
+      SHORT_SHA: ${{ needs.prepare.outputs.short_sha }}
+      TAG: ${{ needs.prepare.outputs.tag }}
+      MINOR: ${{ needs.prepare.outputs.minor }}
+    steps:
+      - name: Compute names and tags
+        id: vars
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          image="ghcr.io/${OWNER,,}/kidra"
+          suffixes=("$TAG" "$MINOR" latest prod)
+          {
+            echo "image=$image"
+            echo "full_tags<<EOF"
+            for s in "${suffixes[@]}"; do echo "$image:$s"; done
+            echo "EOF"
+            echo "slim_tags<<EOF"
+            for s in "${suffixes[@]}"; do echo "$image:$s-slim"; done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Find source images
+        id: src
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          IN_DIGEST: ${{ inputs.digest }}
+          IN_SLIM_DIGEST: ${{ inputs.slim-digest }}
+        run: |
+          if [[ -n "$IN_DIGEST" && -n "$IN_SLIM_DIGEST" ]]; then
+            # Called from main.yml: the exact digests it just pushed.
+            full="$IMAGE@$IN_DIGEST"
+            slim="$IMAGE@$IN_SLIM_DIGEST"
+          elif docker buildx imagetools inspect "$IMAGE:sha-$SHORT_SHA" >/dev/null 2>&1 \
+             && docker buildx imagetools inspect "$IMAGE:sha-$SHORT_SHA-slim" >/dev/null 2>&1; then
+            full="$IMAGE:sha-$SHORT_SHA"
+            slim="$IMAGE:sha-$SHORT_SHA-slim"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::$IMAGE:sha-$SHORT_SHA not found; building from source"
+            exit 0
+          fi
+          {
+            echo "found=true"
+            echo "full=$full"
+            echo "slim=$slim"
+          } >> "$GITHUB_OUTPUT"
+          echo "Reusing $full and $slim"
+
+      - name: Retag existing images
+        if: steps.src.outputs.found == 'true'
+        env:
+          FULL_SRC: ${{ steps.src.outputs.full }}
+          SLIM_SRC: ${{ steps.src.outputs.slim }}
+          FULL_TAGS: ${{ steps.vars.outputs.full_tags }}
+          SLIM_TAGS: ${{ steps.vars.outputs.slim_tags }}
+        run: |
+          retag() {
+            local src="$1" tags="$2" args=()
+            while IFS= read -r t; do
+              if [[ -n "$t" ]]; then args+=(-t "$t"); fi
+            done <<< "$tags"
+            docker buildx imagetools create "${args[@]}" "$src"
+          }
+          retag "$FULL_SRC" "$FULL_TAGS"
+          retag "$SLIM_SRC" "$SLIM_TAGS"
+
+      # Fallback for workflow_dispatch only (main.yml always passes digests).
+      - name: Checkout (fallback build)
+        if: steps.src.outputs.found != 'true'
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Metadata (labels)
+        id: meta
+        if: steps.src.outputs.found != 'true'
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.vars.outputs.image }}
+          labels: |
+            org.opencontainers.image.title=kidra
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ needs.prepare.outputs.sha }}
+
+      - name: Build and push (full)
+        if: steps.src.outputs.found != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: full
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          tags: |
+            ${{ steps.vars.outputs.full_tags }}
+            ${{ steps.vars.outputs.image }}:sha-${{ needs.prepare.outputs.short_sha }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            COMMIT=${{ needs.prepare.outputs.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=full
+          cache-to: type=gha,scope=full,mode=max
+
+      - name: Build and push (slim)
+        if: steps.src.outputs.found != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: slim
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          tags: |
+            ${{ steps.vars.outputs.slim_tags }}
+            ${{ steps.vars.outputs.image }}:sha-${{ needs.prepare.outputs.short_sha }}-slim
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ needs.prepare.outputs.version }}
+            COMMIT=${{ needs.prepare.outputs.sha }}
+            SOURCE_URL=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=slim
+          cache-to: type=gha,scope=slim,mode=max
+
+      - name: Resolve digests
+        id: digest
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+        run: |
+          full="$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{json .Manifest}}' | jq -r .digest)"
+          slim="$(docker buildx imagetools inspect "$IMAGE:$TAG-slim" --format '{{json .Manifest}}' | jq -r .digest)"
+          [[ "$full" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$full'"; exit 1; }
+          [[ "$slim" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::bad digest '$slim'"; exit 1; }
+          echo "digest=$full" >> "$GITHUB_OUTPUT"
+          echo "slim_digest=$slim" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Release images"
+            echo "- full: \`$IMAGE@$full\`"
+            echo "- slim: \`$IMAGE@$slim\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  ui:
+    name: ui
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: frontend/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install and build
+        working-directory: frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+          test -f ../backend/ui/dist/index.html
+
+      # Not `ui-dist`: when called from main.yml this runs in the same workflow
+      # run as ci.yml, which already uploads an artifact with that name.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-ui-dist
+          path: backend/ui/dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  binaries:
+    name: binary (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: [prepare, ui]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      COMMIT: ${{ needs.prepare.outputs.sha }}
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: release-ui-dist
+          path: backend/ui/dist
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build
+        working-directory: backend
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          test -f ui/dist/index.html
+          ext=""; [[ "$GOOS" == windows ]] && ext=".exe"
+          go build -tags embedui -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+            -o "../out/kidra${ext}" .
+
+      - name: Package
+        id: pkg
+        run: |
+          name="kidra_${VERSION}_${GOOS}_${GOARCH}"
+          stage="dist/$name"
+          mkdir -p "$stage"
+          files=(README.md LICENSE deploy/native/kidra.service deploy/native/windows.md)
+          for f in "${files[@]}"; do
+            test -f "$f" || { echo "::error::required release file '$f' is missing"; exit 1; }
+          done
+          test -d backend/pb_migrations || { echo "::error::backend/pb_migrations is missing"; exit 1; }
+          cp out/kidra* "$stage/"
+          cp -r backend/pb_migrations "$stage/pb_migrations"
+          cp "${files[@]}" "$stage/"
+          cd dist
+          if [[ "$GOOS" == windows ]]; then
+            zip -qr "$name.zip" "$name"
+            echo "file=dist/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -czf "$name.tar.gz" --owner=0 --group=0 "$name"
+            echo "file=dist/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release:
+    name: publish release
+    needs: [prepare, image, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bin-*
+          path: assets
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: assets
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      # The release itself (title, notes from CHANGELOG.md) was created by
+      # release-please; only add assets and the image digests here.
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Add image digests to the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          IMAGE: ${{ needs.image.outputs.image }}
+          FULL_DIGEST: ${{ needs.image.outputs.digest }}
+          SLIM_DIGEST: ${{ needs.image.outputs.slim-digest }}
+        run: |
+          marker='<!-- kidra:images -->'
+          body="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body)"
+          # Re-runs replace the previously appended section instead of adding another.
+          body="${body%%"$marker"*}"
+          # shellcheck disable=SC2016 # backticks are Markdown, not command substitution
+          images="$(printf '%s\n### Container images\n\n- full: `%s:%s` (`%s`)\n- slim: `%s:%s-slim` (`%s`)\n' \
+            "$marker" "$IMAGE" "$TAG" "$FULL_DIGEST" "$IMAGE" "$TAG" "$SLIM_DIGEST")"
+          printf '%s\n\n%s\n' "${body%$'\n'}" "$images" > notes.md
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+
+  deploy-prod:
+    name: deploy prod
+    needs: [prepare, image, publish-release]
+    # Self-hosted deploy runner. Only reachable from main.yml (push to main)
+    # or a manual dispatch from main, never from pull_request.
+    runs-on: [self-hosted, kidra-deploy]
+    permissions:
+      contents: read
+    environment:
+      name: prod
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - name: Deploy
+        env:
+          IMAGE_REF: ${{ needs.image.outputs.image }}@${{ needs.image.outputs.digest }}
+          COMMIT: ${{ needs.prepare.outputs.sha }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          VM_KNOWN_HOSTS: ${{ secrets.VM_KNOWN_HOSTS }}
+          PVE_API_TOKEN: ${{ secrets.PVE_API_TOKEN }}
+          PVE_API_URL: ${{ vars.PVE_API_URL }}
+          PVE_NODE: ${{ vars.PVE_NODE }}
+          VM_ID: ${{ vars.VM_ID }}
+          VM_HOST: ${{ vars.VM_HOST }}
+          KEEP_SNAPSHOTS: ${{ vars.KEEP_SNAPSHOTS }}
+          HEALTH_TIMEOUT: ${{ vars.HEALTH_TIMEOUT }}
+          VM_HTTP_PORT: ${{ vars.VM_HTTP_PORT }}
+          PVE_INSECURE: ${{ vars.PVE_INSECURE }}
+          PVE_CA_FILE: ${{ vars.PVE_CA_FILE }}
+        run: |
+          test -f deploy/ci/deploy.sh || { echo "::error::deploy/ci/deploy.sh is missing"; exit 1; }
+          bash deploy/ci/deploy.sh prod "$IMAGE_REF" "$COMMIT"
