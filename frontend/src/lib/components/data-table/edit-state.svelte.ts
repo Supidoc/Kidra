@@ -53,7 +53,11 @@ export class TableEditState<T extends EditableRow> implements TableEditContext {
 	readonly rows: T[] = $derived.by(() => {
 		const data = this.#options.data();
 		if (!this.#draft) return data;
-		if (this.newRowId !== null) return [this.#draft, ...data];
+		if (this.newRowId !== null) {
+			// A synchronous `onCreate` may already have added the row under the same id.
+			const newRowId = this.newRowId;
+			return [this.#draft, ...data.filter((row) => this.rowId(row) !== newRowId)];
+		}
 		return data.map((row) => this.display(row));
 	});
 

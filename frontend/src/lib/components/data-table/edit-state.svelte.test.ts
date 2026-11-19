@@ -85,6 +85,19 @@ describe('TableEditState', () => {
 		expect(onCreate).toHaveBeenCalledWith({ id: 'new-1', name: '' });
 	});
 
+	it('does not show a new row twice when onCreate adds it to the data synchronously', () => {
+		const data = $state<Row[]>([a]);
+		const edit = new TableEditState<Row>({
+			data: () => data,
+			onCreate: (row) => {
+				data.push(row);
+				expect(edit.rows.map((r) => r.id)).toEqual(['new-1', 'a']);
+			}
+		});
+		edit.addRow({ id: 'new-1', name: '' });
+		void edit.save();
+	});
+
 	it('cancel restores the data and drops a new row', () => {
 		const { edit, data, onCreate, onUpdate } = setup();
 		edit.startEdit(a);
