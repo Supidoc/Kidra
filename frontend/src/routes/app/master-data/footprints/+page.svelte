@@ -54,7 +54,7 @@
 				: null;
 		}
 		const src = footprintPreviewUrl(selected);
-		return src ? { kind: 'svg', src, name: `${selected.name}.svg` } : null;
+		return src ? { kind: 'svg', src, name: `${selected.name}.svg`, background: 'dark' } : null;
 	});
 	const emptyText = $derived(
 		!selected
