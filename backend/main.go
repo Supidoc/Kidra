@@ -77,6 +77,7 @@ func main() {
 	RegisterCorsEndpoint(app)
 	RegisterModelHooks(app)
 	RegisterFootprintModelRoutes(app, func() *GitManager { return gitManager }, modelDir, stockModelDir)
+	RegisterLibrarySyncRoute(app, func() *LibrarySync { return librarySync })
 
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		// The data dir is only known once the CLI flags are parsed.
