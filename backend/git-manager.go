@@ -65,6 +65,9 @@ func (manager *GitManager) ensureLocked() (bool, error) {
 
 	repo, err := git.PlainOpen(manager.repoPath)
 	if err == nil {
+		if err := syncOriginURL(repo, manager.repoURL); err != nil {
+			return false, err
+		}
 		manager.repo = repo
 		return false, nil
 	}
@@ -91,6 +94,31 @@ func (manager *GitManager) ensureLocked() (bool, error) {
 	}
 	manager.repo = repo
 	return true, nil
+}
+
+// syncOriginURL points the existing clone's origin at url, so changing
+// KIDRA_LIBRARY_REPO takes effect on an existing clone. The next Pull() force-fetches
+// the branch from the new URL and hard-resets the worktree to it.
+func syncOriginURL(repo *git.Repository, url string) error {
+	if url == "" {
+		return nil
+	}
+	remote, err := repo.Remote("origin")
+	if err == nil {
+		urls := remote.Config().URLs
+		if len(urls) == 1 && urls[0] == url {
+			return nil
+		}
+		if err := repo.DeleteRemote("origin"); err != nil {
+			return fmt.Errorf("remove old origin: %w", err)
+		}
+	} else if !errors.Is(err, git.ErrRemoteNotFound) {
+		return fmt.Errorf("read origin: %w", err)
+	}
+	if _, err := repo.CreateRemote(&config.RemoteConfig{Name: "origin", URLs: []string{url}}); err != nil {
+		return fmt.Errorf("set origin to %s: %w", url, err)
+	}
+	return nil
 }
 
 // targetBranchLocked returns the branch to mirror: the configured one, or the

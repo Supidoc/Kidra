@@ -168,6 +168,28 @@ func TestGitManagerSwitchBranchOnExistingClone(t *testing.T) {
 	mustPull(t, mainManager, false)
 }
 
+func TestGitManagerChangedRepoURL(t *testing.T) {
+	oldSource := newSourceRepo(t)
+	clonePath := filepath.Join(t.TempDir(), "clone")
+	oldManager, _ := NewGitManager(oldSource.path, clonePath, "dev")
+	mustPull(t, oldManager, true)
+
+	// Restart with KIDRA_LIBRARY_REPO pointing at an unrelated repository.
+	newSource := newSourceRepo(t)
+	newSource.checkout("dev")
+	newSource.commit("lib.txt", "new repo dev")
+	newManager, _ := NewGitManager(newSource.path, clonePath, "dev")
+	mustPull(t, newManager, true)
+	if got := readLib(t, newManager); got != "new repo dev" {
+		t.Fatalf("lib = %q, want new repo dev", got)
+	}
+	remote, _ := newManager.repo.Remote("origin")
+	if urls := remote.Config().URLs; len(urls) != 1 || urls[0] != newSource.path {
+		t.Fatalf("origin = %v, want %s", urls, newSource.path)
+	}
+	mustPull(t, newManager, false)
+}
+
 func TestGitManagerMissingBranch(t *testing.T) {
 	source := newSourceRepo(t)
 	manager, _ := NewGitManager(source.path, filepath.Join(t.TempDir(), "clone"), "nope")
