@@ -32,7 +32,7 @@
 			</Card.Action>
 		</Card.Header>
 		<Card.Footer class="mt-auto h-full flex-col items-start gap-1.5 border-t bg-muted pb-6 text-sm">
-			<div class="line-clamp-1 font-medium">{@render footer?.()}</div>
+			<div class="line-clamp-3 font-medium">{@render footer?.()}</div>
 		</Card.Footer>
 	</Card.Root>
 </a>
