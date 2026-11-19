@@ -11,11 +11,6 @@ export type PreviewSource = {
 	 * and the download link of `none` uses it as the file name.
 	 */
 	name: string;
-	/**
-	 * Backdrop of an `svg`: `light` (white, like KiCad's schematic editor, the default) or
-	 * `dark` (KiCad's PCB editor background, for footprints).
-	 */
-	background?: 'light' | 'dark';
 };
 
 /**
