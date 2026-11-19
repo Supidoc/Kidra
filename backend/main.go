@@ -55,6 +55,7 @@ func main() {
 	//   KIDRA_APP_URL, KIDRA_TRUSTED_PROXY, KIDRA_ADMIN_EMAIL, KIDRA_ADMIN_PASSWORD
 	//                             applied by the bootstrap migration (see pb_migrations)
 	//   KIDRA_LIBRARY_REPO        git URL of the KiCad library repository
+	//   KIDRA_LIBRARY_BRANCH      branch to mirror (default: the repository's default branch)
 	//   KIDRA_LIBRARY_PATH        where it is cloned (default <dataDir>/repositories/project)
 	//   KIDRA_LIBRARY_PULL_CRON   pull schedule (default every 5 minutes)
 	//   KIDRA_3DMODEL_DIR         repo-relative dir that ${KICAD*_3DMODEL_DIR} maps to
@@ -65,6 +66,7 @@ func main() {
 	//   KIDRA_DOWNLOAD_ALLOW_PRIVATE
 	//                             "true" lets the download proxy fetch from private networks
 	repoURL := envOr("KIDRA_LIBRARY_REPO", defaultLibraryRepo)
+	repoBranch := envOr("KIDRA_LIBRARY_BRANCH", "")
 	modelDir := envOr("KIDRA_3DMODEL_DIR", defaultModelDir)
 	stockModelDir := findStockModelDir(envOr("KIDRA_KICAD_STOCK_3DMODEL_DIR", ""), stockModelDirCandidates)
 
@@ -79,13 +81,13 @@ func main() {
 	app.OnServe().BindFunc(func(se *core.ServeEvent) error {
 		// The data dir is only known once the CLI flags are parsed.
 		repoPath := envOr("KIDRA_LIBRARY_PATH", filepath.Join(app.DataDir(), "repositories", "project"))
-		manager, err := NewGitManager(repoURL, repoPath)
+		manager, err := NewGitManager(repoURL, repoPath, repoBranch)
 		if err != nil {
 			return err
 		}
 		gitManager = manager
 		librarySync = NewLibrarySync(app, manager, NewRenderer(app.Logger()))
-		app.Logger().Info("library repository", "url", repoURL, "path", manager.RepoPath(), "3dModelDir", modelDir, "stock3dModelDir", stockModelDir)
+		app.Logger().Info("library repository", "url", repoURL, "branch", repoBranch, "path", manager.RepoPath(), "3dModelDir", modelDir, "stock3dModelDir", stockModelDir)
 
 		// Clone/pull and parse once in the background; start-up never waits for the network.
 		go librarySync.Run(true)
