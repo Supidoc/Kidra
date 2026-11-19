@@ -71,7 +71,7 @@
 				icon: CircuitBoardIcon,
 				preview:
 					footprint && footprintUrl
-						? { kind: 'svg', src: footprintUrl, name: `${footprint.name}.svg` }
+						? { kind: 'svg', src: footprintUrl, name: `${footprint.name}.svg`, background: 'dark' }
 						: null,
 				emptyText: footprint ? 'No preview available.' : 'No footprint selected.'
 			}

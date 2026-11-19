@@ -70,7 +70,13 @@
 	/>
 {:else if preview.kind === 'image' || preview.kind === 'svg'}
 	<div
-		class={['flex items-center justify-center', preview.kind === 'svg' ? 'bg-white p-6' : 'p-2']}
+		class={[
+			'flex items-center justify-center',
+			preview.kind === 'svg'
+				? // #001023 is the board background of KiCad's default PCB editor theme.
+					['p-6', preview.background === 'dark' ? 'bg-[#001023]' : 'bg-white']
+				: 'p-2'
+		]}
 		style="height: {height};"
 	>
 		<!-- KiCad SVGs have a tiny intrinsic size in mm, so scale them up to fill the pane. -->
