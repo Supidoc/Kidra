@@ -27,6 +27,10 @@ function occtImportJs(): Plugin {
 	};
 }
 
+// The app version shown in the UI (`version` from `$app/env`). release-please bumps
+// package.json together with version.txt, so it always matches the released version.
+const { version } = createRequire(import.meta.url)('./package.json') as { version: string };
+
 export default defineConfig({
 	plugins: [
 		occtImportJs(),
@@ -37,6 +41,7 @@ export default defineConfig({
 				runes: ({ filename }) =>
 					filename.split(/[/\\]/).includes('node_modules') ? undefined : true
 			},
+			version: { name: version },
 			// Single-page app embedded into / served by the Go backend from backend/ui/dist.
 			adapter: adapter({
 				pages: '../backend/ui/dist',

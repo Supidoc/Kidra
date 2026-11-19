@@ -6,6 +6,7 @@
 	import { navigation } from '#lib/navigation.ts';
 	import { mode, toggleMode } from 'mode-watcher';
 	import NavUser from './nav-user.svelte';
+	import { version } from '$app/env';
 
 	let { ref = $bindable(null), ...restProps }: ComponentProps<typeof Sidebar.Root> = $props();
 
@@ -28,7 +29,7 @@
 							</div>
 							<div class="flex flex-col gap-0.5 leading-none">
 								<span class="font-medium">KIDRA</span>
-								<span class="">v0.0.1</span>
+								<span class="">v{version}</span>
 							</div>
 						</a>
 					{/snippet}
