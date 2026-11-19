@@ -35,6 +35,23 @@ function authHeaders(): HeadersInit {
 	return pb.authStore.token ? { Authorization: pb.authStore.token } : {};
 }
 
+/**
+ * Makes the backend pull the library repository and re-parse the symbol and footprint
+ * libraries now. Resolves once they are parsed; previews keep rendering in the background.
+ *
+ * @throws an `Error` with a readable message when the sync could not run (e.g. one is
+ * already running).
+ */
+export async function syncLibraries(): Promise<void> {
+	const response = await fetch(apiUrl('/api/kidra/library/sync'), {
+		method: 'POST',
+		headers: authHeaders()
+	});
+	if (response.ok) return;
+	const body = (await response.json().catch(() => null)) as { message?: string } | null;
+	throw new Error(body?.message || `Failed to reload the libraries (${response.status}).`);
+}
+
 function modelPath(footprintId: string) {
 	return apiUrl(`/api/footprint-model/${encodeURIComponent(footprintId)}`);
 }
