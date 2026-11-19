@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { RefreshCwIcon } from '@lucide/svelte';
 	import {
 		createColumns,
 		TreeTable,
@@ -11,7 +12,8 @@
 	import RowActionsMenu from '#lib/components/row-actions-menu.svelte';
 	import { createCollection } from '#lib/data/collection.svelte.ts';
 	import { FootprintModelState } from '#lib/data/footprint-model.svelte.ts';
-	import { footprintPreviewUrl } from '#lib/data/kicad-previews.ts';
+	import { footprintPreviewUrl, syncLibraries } from '#lib/data/kicad-previews.ts';
+	import { notify } from '#lib/notify.ts';
 	import { buildLibraryTree, type TreeRow } from '#lib/data/library-tree.ts';
 	import type { FootprintLibrariesRecord, FootprintsRecord } from '#lib/data/pocketbase-types.ts';
 
@@ -64,6 +66,24 @@
 				: 'No preview available.'
 	);
 
+	let syncing = $state(false);
+	const busy = $derived(syncing || libraries.loading || footprints.loading);
+	async function reloadLibraries() {
+		syncing = true;
+		try {
+			await syncLibraries();
+			await Promise.all([libraries.load(), footprints.load()]);
+			notify.success(
+				'New or changed footprints may take a moment to show a preview.',
+				'Libraries reloaded'
+			);
+		} catch (error) {
+			notify.error(error instanceof Error ? error.message : String(error), 'Reload failed');
+		} finally {
+			syncing = false;
+		}
+	}
+
 	let toDelete = $state<FootprintsRecord>();
 	let deleteOpen = $state(false);
 </script>
@@ -82,12 +102,24 @@
 	{/if}
 {/snippet}
 
+{#snippet toolbarActions()}
+	<Button
+		size="icon-sm"
+		variant="ghost"
+		aria-label="Reload libraries from repository"
+		title="Reload libraries from repository"
+		disabled={busy}
+		onclick={reloadLibraries}><RefreshCwIcon class={busy ? 'animate-spin' : undefined} /></Button
+	>
+{/snippet}
+
 <div class="grid items-start gap-4 xl:grid-cols-[minmax(0,1fr)_26rem]">
 	<TreeTable
 		data={tree}
 		getSubRows={(row) => row.children}
 		{columns}
 		{rowActions}
+		{toolbarActions}
 		selectedRowId={selectedId}
 		onRowClick={(row) => {
 			if (row.kind === 'item') selectedId = row.id;

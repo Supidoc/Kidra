@@ -70,9 +70,10 @@ func NewLibrarySync(app core.App, git *GitManager, renderer Renderer) *LibrarySy
 
 // Run pulls the repository and re-parses it when it changed, when force is set, or
 // when the previous parse failed. Errors are logged; it never panics or exits.
-func (s *LibrarySync) Run(force bool) {
+// It returns false without doing anything when another run is in progress.
+func (s *LibrarySync) Run(force bool) bool {
 	if !s.syncing.CompareAndSwap(false, true) {
-		return
+		return false
 	}
 	defer s.syncing.Store(false)
 
@@ -82,13 +83,13 @@ func (s *LibrarySync) Run(force bool) {
 		logger.Warn("library repository pull failed", "error", err)
 	}
 	if !s.git.Ready() {
-		return // not cloned yet (offline?); the cron retries
+		return true // not cloned yet (offline?); the cron retries
 	}
 	if changed {
 		logger.Info("library repository updated")
 	}
 	if !changed && !force && s.parsed.Load() {
-		return
+		return true
 	}
 
 	renderAvailable := s.renderer.Available()
@@ -109,6 +110,7 @@ func (s *LibrarySync) Run(force bool) {
 	if renderAvailable {
 		s.scheduleRender(append(symbolJobs, footprintJobs...))
 	}
+	return true
 }
 
 // scheduleRender hands jobs to the background renderer. If a render run is in
