@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	defaultLibraryRepo = "https://github.com/Supidoc/Gradur_Libraries_Test.git"
+	defaultLibraryRepo = "https://github.com/Supidoc/Kidra-Lib.git"
 	defaultModelDir    = "3dmodels"
 	defaultPullCron    = "*/5 * * * *"
 )
