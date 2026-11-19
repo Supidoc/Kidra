@@ -186,8 +186,8 @@ su - runner
 mkdir actions-runner && cd actions-runner
 curl -fsSLo runner.tar.gz https://github.com/actions/runner/releases/download/v<version>/actions-runner-linux-x64-<version>.tar.gz
 tar xzf runner.tar.gz
-./config.sh --unattended --url https://github.com/<owner>/kidra --token <registration-token> \
-  --name kidra-runner --labels kidra-deploy --no-default-labels --replace
+./config.sh --unattended --url https://github.com/Supidoc/Kidra --token <registration-token> \
+  --name kidra-runner --labels kidra-deploy --replace
 exit
 cd /home/runner/actions-runner && ./svc.sh install runner && ./svc.sh start
 ```
