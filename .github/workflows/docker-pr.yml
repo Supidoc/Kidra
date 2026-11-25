@@ -38,7 +38,7 @@ jobs:
       matrix:
         target: [slim, full]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -49,10 +49,10 @@ jobs:
         run: |
           echo "short_sha=${HEAD_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build ${{ matrix.target }} (no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile
